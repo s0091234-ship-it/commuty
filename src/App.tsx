@@ -10,7 +10,7 @@ import { AuthModal } from './components/AuthModal';
 import { AdminDashboard } from './components/AdminDashboard';
 import { RoleSwitcher } from './components/RoleSwitcher';
 import { dbService } from './lib/supabaseService';
-import { isSupabaseConfigured } from './lib/supabaseClient';
+import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 
 const STORAGE_KEY_POSTS = 'band_leaders_posts_v1';
 const STORAGE_KEY_COMMENTS = 'band_leaders_comments_v1';
@@ -47,7 +47,7 @@ export function App() {
   const [editingPost, setEditingPost] = useState<Post | null>(null);
   const [isSupabaseLive, setIsSupabaseLive] = useState(isSupabaseConfigured);
 
-  // Initial Data Fetch from Supabase if configured
+  // Initial Data Fetch & Supabase Auth Session Sync
   useEffect(() => {
     if (isSupabaseConfigured) {
       dbService.getPosts().then(remotePosts => {
@@ -66,6 +66,39 @@ export function App() {
           setUsers(remoteUsers);
         }
       });
+
+      // Google OAuth Session Check & Listener
+      if (supabase) {
+        // 1. Initial Session Check
+        supabase.auth.getSession().then(async ({ data: { session } }) => {
+          if (session?.user) {
+            const syncedUser = await dbService.syncUserProfile(session.user);
+            if (syncedUser) {
+              setCurrentUser(syncedUser);
+            }
+          }
+        });
+
+        // 2. Auth State Change (e.g. redirect callback after Google Login)
+        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+          if (event === 'SIGNED_IN' && session?.user) {
+            const syncedUser = await dbService.syncUserProfile(session.user);
+            if (syncedUser) {
+              setCurrentUser(syncedUser);
+              dbService.getUsers().then(remoteUsers => {
+                if (remoteUsers) setUsers(remoteUsers);
+              });
+            }
+          } else if (event === 'SIGNED_OUT') {
+            setCurrentUser(null);
+            setIsAdminView(false);
+          }
+        });
+
+        return () => {
+          subscription.unsubscribe();
+        };
+      }
     }
   }, []);
 
@@ -433,7 +466,13 @@ export function App() {
         isAdminView={isAdminView}
         onToggleAdminView={(admin) => setIsAdminView(admin)}
         onOpenAuth={(mode) => { setAuthMode(mode); setIsAuthOpen(true); }}
-        onLogout={() => { setCurrentUser(null); setIsAdminView(false); }}
+        onLogout={async () => {
+          if (isSupabaseConfigured) {
+            await dbService.signOut();
+          }
+          setCurrentUser(null);
+          setIsAdminView(false);
+        }}
         onOpenCreatePost={() => { setEditingPost(null); setIsEditorOpen(true); }}
       />
 
